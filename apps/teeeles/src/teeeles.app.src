@@ -1,0 +1,19 @@
+{application, teeeles,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, { teeeles_app, []}},
+  {applications,
+   [kernel,
+    crypto,
+    public_key,
+    lager,
+    stdlib
+   ]},
+  {env,[]},
+  {modules, []},
+
+  {maintainers, []},
+  {licenses, []},
+  {links, []}
+ ]}.
