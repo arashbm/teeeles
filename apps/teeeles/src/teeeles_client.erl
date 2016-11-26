@@ -23,12 +23,15 @@
         ]).
 
 -include("tls_records.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 -record(state, {
           manager,
-          client_random,
-          server_random,
-          suit
+          client_random :: binary(),
+          server_random :: binary(),
+          suit :: binary(),
+          compression :: byte(),
+          cert_chain :: [#'OTPCertificate'{}]
          }).
 
 %%%===================================================================
@@ -132,20 +135,18 @@ hello(cast, #tls_record{record_value = #tls_handshake{
   <<Version:2/binary,
     ServerRandom:32/binary,
     SessionIDLength, Rest/binary>> = ServerHello,
-  lager:info("ServerHello: ~p", [SessionIDLength]),
+  lager:info("ServerHello"),
   <<_Session:SessionIDLength/binary, Suit:2/binary, Compression, _Exts/binary>> = Rest,
-  Suit = ?TLS_RSA_WITH_AES_128_CBC_SHA,
-  Compression = 0,
-
-  {keep_state, State#state{server_random=ServerRandom, suit=Suit}};
+  {keep_state, State#state{server_random=ServerRandom,
+                           suit=Suit,
+                           compression=Compression}};
 hello(cast, #tls_record{record_value = #tls_handshake{
                                           type = ?HandshakeTypeCertificate,
                                           message = CertMsg
                                          }}, State) ->
   <<_CertLen:24, CertBin/binary>> = CertMsg,
   CertChain = decode_certs(CertBin),
-  lager:info("Certificate: ~p", [CertChain]),
-  {keep_state, State};
+  {keep_state, State#state{cert_chain=CertChain}};
 hello(cast, #tls_record{record_value = #tls_handshake{
                                           type = ?HandshakeTypeServerKeyExchange,
                                           message = ServerKeyExchange
@@ -154,9 +155,14 @@ hello(cast, #tls_record{record_value = #tls_handshake{
   {keep_state, State};
 hello(cast, #tls_record{record_value = #tls_handshake{
                                           type = ?HandshakeTypeServerHelloDone
-                                         }}, State) ->
+                                         }}, State = #state{}) ->
   lager:info("ServerHelloDone."),
-  {next_state, key_exchange, State}.
+  case verify_connection_state(State) of
+    {error, Error} ->
+      {stop, Error, State};
+    ok ->
+      {next_state, key_exchange, State}
+  end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -198,4 +204,13 @@ decode_certs(<<>>, Decoded) ->
   Decoded;
 decode_certs(<<CertLen:24,CertAndRest/binary>>, Decoded) ->
   <<Cert:CertLen/binary, Rest/binary>> = CertAndRest,
-  decode_certs(Rest, Decoded ++ [public_key:pkix_decode_cert(Cert, otp)]).
+  DecodedCert = public_key:pkix_decode_cert(Cert, otp),
+  lager:info("Certificate: ~p", [lager:pr(DecodedCert, ?MODULE)]),
+  decode_certs(Rest, Decoded ++ [DecodedCert]).
+
+verify_connection_state(#state{compression=C}) when C =/= 0 ->
+  {error, compression_not_supported};
+verify_connection_state(#state{suit=S}) when S =/= ?TLS_RSA_WITH_AES_128_CBC_SHA ->
+  {error, bad_server_cipher_suit};
+verify_connection_state(#state{cert_chain=Chain}) ->
+  teeeles_certificate:verify_chain(Chain).
